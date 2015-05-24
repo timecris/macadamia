@@ -4,13 +4,14 @@ import os, sys
 import string, re, base64
 import bencode, hashlib
 import urllib, pycurl
+import BaseHTTPServer
 from StringIO import StringIO
 from sites import *
 from bs4 import BeautifulSoup
 
 class Macadamia:
 	def __init__(self, keyword):
-		self.MAGNETS = []
+		self.BASKET = []
 		self.KEYWORD = keyword
 
 	def _from(self, siteName):
@@ -21,7 +22,10 @@ class Macadamia:
 		buffer = StringIO()
 		curl = pycurl.Curl()
 		curl.setopt(pycurl.URL, url)
-		curl.setopt(pycurl.WRITEDATA, buffer)
+		try:
+			curl.setopt(pycurl.WRITEDATA, buffer)
+		except TypeError:
+			curl.setopt(pycurl.WRITEFUNCTION, buffer.write)
 		curl.setopt(pycurl.FOLLOWLOCATION, 1)
 		curl.setopt(pycurl.COOKIEJAR, '/tmp/cookie.txt')
 		curl.setopt(pycurl.COOKIEFILE, '/tmp/cookie.txt')
@@ -50,6 +54,13 @@ class Macadamia:
 		except:
 			return {"name": "", "magnet": ""}
 
+	def checkTorrent(self, seed):
+		magicCode = seed[0:2]
+		if magicCode == "d8":
+			return True
+		else:
+			return False
+
 	def addTorrent(self, host, title, seed):
 		torrentInfo = self.tor2magnet(seed)
 		torrentInfo["title"] = title
@@ -58,30 +69,35 @@ class Macadamia:
 		if torrentInfo["name"] == "":
 			torrentInfo["name"] = "".join(i for i in title if i not in "\/:*?<>|")
 
-		self.MAGNETS.append(torrentInfo)
+		self.BASKET.append(torrentInfo)
 
 	def getHostedSites(self):
 		sites = set()
-		for entry in self.MAGNETS:
+		for entry in self.BASKET:
 			sites.add(entry["hostedBy"])
 
 		return string.join(sites, ", ")
 
-	def export(self, argument):
-		if len(argument) == 0 :
-			self.exportRss("")
-		elif len(argument) - argument.rfind(".rss") == 3 :
-			self.exportRss(argument)
-		elif len(argument) - argument.rfind("/") == 1 :
-			for entry in self.MAGNETS:
-				fd = open(argument + entry["name"] + ".torrent", "wb")
-				fd.write(entry["binary"])
-				fd.close()
-		else :
-			self.exportRss("")
+	def _basket(self):
+		return self.exportRss()
 
-	def exportRss(self, rssFile):
-		print "Exporting ..."
+	def store_rss(self, rss):
+		fd = open(rss, "w")
+		fd.write(self.exportRss().encode("utf8"))
+		fd.close()
+
+	def store_in(self, here):
+		if os.path.isdir(here) == False:
+			print "Invalid exporting directory ..."
+			return False
+
+		for entry in self.BASKET:
+			fd = open(here + entry["name"] + ".torrent", "wb")
+			fd.write(entry["binary"])
+			fd.close()
+
+	def exportRss(self):
+		print "Transforming in RSS ..."
 		doc = BeautifulSoup("<rss version=\"2.0\"></rss>", "xml")
 		doc.rss.append(doc.new_tag("channel"))
 		doc.rss.channel.append(doc.new_tag("title"))
@@ -89,7 +105,7 @@ class Macadamia:
 		doc.rss.channel.title.insert(0, "Macadamia: RSS for \"" + self.KEYWORD + "\"")
 		doc.rss.channel.description.insert(0, "Macadamia generated RSS for \"" + self.KEYWORD + "\" searched from " + self.getHostedSites())
 
-		for entry in self.MAGNETS:
+		for entry in self.BASKET:
 			item = doc.new_tag("item");
 			item.append(doc.new_tag("title"))
 			item.append(doc.new_tag("link"))
@@ -100,10 +116,27 @@ class Macadamia:
 			doc.rss.channel.append(item)
 
 		rssData = doc.prettify()
+		return rssData
 
-		if rssFile == "" :
-			print rssData
-		else :
-			fd = open(rssFile, "w")
-			fd.write(rssData.encode("utf8"))
-			fd.close()
+class MacadamiaServer(BaseHTTPServer.BaseHTTPRequestHandler):
+	def do_GET(self):
+		keyword = self.path[1:]
+
+		if keyword == "favicon.ico":
+			self.send_response(404)
+			self.end_headers()
+		elif len(keyword) < 1:
+			self.send_response(403)
+			self.end_headers()
+		else:
+			self.send_response(200)
+			self.end_headers()
+			keyword = urllib.unquote(keyword)
+
+			# FIXME: Wanna do this job at class outside
+			Seeds = Macadamia(keyword)
+			# Retrieve torrent from seeder sites
+			Seeds._from("gwtorrent")
+			Seeds._from("torrentbest")
+
+			self.wfile.write(Seeds._basket().encode("utf8"))
